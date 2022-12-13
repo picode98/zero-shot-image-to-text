@@ -152,9 +152,12 @@ class CLIPTextGenerator:
         seq_lengths = torch.ones(beam_size, device=self.device)
         is_stopped = torch.zeros(beam_size, device=self.device, dtype=torch.bool)
 
+        ending_tokens = [*[self.lm_tokenizer.encode(val)[0] for val in ['.', '!', '\n\n']], self.lm_tokenizer.eos_token_id]
         for i in range(self.target_seq_length):
             probs = self.get_next_probs(i, context_tokens)
             logits = probs.log()
+            logits[:, ending_tokens] = -np.inf
+            logits[torch.isnan(logits)] = -np.inf
 
             if scores is None:
                 scores, next_tokens = logits.topk(beam_size, -1)
@@ -167,16 +170,17 @@ class CLIPTextGenerator:
                     gen_tokens = gen_tokens.expand(beam_size, *gen_tokens.shape[1:])
                     gen_tokens = torch.cat((gen_tokens, next_tokens), dim=1)
             else:
-                logits[is_stopped] = -float(np.inf)
-                logits[is_stopped, 0] = 0
+                # logits[is_stopped] = -float(np.inf)
+                # logits[is_stopped, 0] = 0
                 scores_sum = scores[:, None] + logits
                 seq_lengths[~is_stopped] += 1
                 scores_sum_average = scores_sum / seq_lengths[:, None]
-                scores_sum_average, next_tokens = scores_sum_average.view(-1).topk(
+
+                scores_sum_average, global_next_tokens = scores_sum_average.view(-1).topk(
                     beam_size, -1)
-                next_tokens_source = next_tokens // scores_sum.shape[1]
+                next_tokens_source = global_next_tokens // scores_sum.shape[1]
                 seq_lengths = seq_lengths[next_tokens_source]
-                next_tokens = next_tokens % scores_sum.shape[1]
+                next_tokens = global_next_tokens % scores_sum.shape[1]
                 next_tokens = next_tokens.unsqueeze(1)
                 gen_tokens = gen_tokens[next_tokens_source]
                 gen_tokens = torch.cat((gen_tokens, next_tokens), dim=-1)
@@ -363,7 +367,7 @@ class CLIPTextGenerator:
             if p_.grad is not None:
                 p_.grad.data.zero_()
 
-        top_size = 512
+        top_size = int(512 / (2 ** min(max(0, context_tokens.shape[1] - 6), 5)))
         _, top_indices = probs.topk(top_size, -1)
 
         prefix_texts = [self.lm_tokenizer.decode(x).replace(self.lm_tokenizer.bos_token, '') for x in context_tokens]
